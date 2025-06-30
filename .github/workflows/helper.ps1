@@ -57,7 +57,7 @@ function Get-FreshIsoLink {
     Write-Host "[INFO] Getting fresh ISO link using GetWindowsISO.ps1..."
     try {
         # Capture all output from the script
-        $scriptOutput = & pwsh -ExecutionPolicy Bypass -File $getIsoScript $getIsoParam -ReturnOnly 2>&1
+        $scriptOutput = & pwsh -ExecutionPolicy Bypass -File $getIsoScript $getIsoParam 2>&1
         
         # Extract the actual URL from the output (look for https:// lines)
         $isoLink = $null

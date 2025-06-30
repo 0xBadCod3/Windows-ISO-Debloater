@@ -1,19 +1,15 @@
 param(
     [switch]$win10,
     [switch]$win11,
-    [switch]$ReturnOnly  # New parameter to return URL without display
+    [switch]$ReturnOnly
 )
 
-# Function to make HTTP requests with error handling and Mac user agent spoofing
+# Function to make HTTP requests
 function Invoke-WebRequestSafe {
-    param(
-        [string]$Uri
-    )
-    
+    param( [string]$Uri )
     try {
-        # Mac user agent for spoofing (only safe header to add)
+        # Mac user agent for spoofing
         $userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        
         $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -UserAgent $userAgent
         return $response.Content | ConvertFrom-Json
     }
@@ -31,10 +27,10 @@ if (-not $win10 -and -not $win11) {
 
 # Optimized target OS detection
 $targetOS = if ($win10) { "Windows 10" } else { "Windows 11" }
-Write-Host "Fetching $targetOS download link..." -ForegroundColor Cyan
+Write-Host "[INFO] Fetching $targetOS download link..."
 
 # Step 1: Get products list
-Write-Host "Fetching products list..."
+Write-Host "[INFO] Fetching products list..."
 $productsUrl = "https://msdl.gravesoft.dev/data/products.json"
 $products = Invoke-WebRequestSafe -Uri $productsUrl
 
@@ -46,7 +42,7 @@ foreach ($key in $products.PSObject.Properties.Name) {
     $value = $products.$key
     if ($value -match $searchPattern) {
         $productId = $key
-        Write-Host "Found $targetOS product: $value"
+        Write-Host "[INFO] Found $targetOS product: $value"
         break
     }
 }
@@ -57,7 +53,7 @@ if (-not $productId) {
 }
 
 # Step 3: Get SKU information
-Write-Host "Fetching SKU information for product ID: $productId"
+Write-Host "[INFO] Fetching SKU information for product ID: $productId"
 $skuUrl = "https://api.gravesoft.dev/msdl/skuinfo?product_id=$productId"
 $skuInfo = Invoke-WebRequestSafe -Uri $skuUrl
 
@@ -66,7 +62,7 @@ $englishSkuId = $null
 foreach ($sku in $skuInfo.Skus) {
     if ($sku.Language -eq "English") {
         $englishSkuId = $sku.Id
-        Write-Host "Found English SKU: $($sku.Description)"
+        Write-Host "[INFO] Found English SKU: $($sku.Description)"
         break
     }
 }
@@ -77,39 +73,60 @@ if (-not $englishSkuId) {
 }
 
 # Step 5: Get download link
-Write-Host "Fetching download link..."
+Write-Host "[INFO] Fetching download link..."
 $downloadUrl = "https://api.gravesoft.dev/msdl/proxy?product_id=$productId&sku_id=$englishSkuId"
 $downloadInfo = Invoke-WebRequestSafe -Uri $downloadUrl
 
-# Step 6: Extract and display the URI with enhanced formatting
+# Step 6: Extract and display the URI with enhanced formatting (FIXED FOR x64)
 if ($downloadInfo.ProductDownloadOptions -and $downloadInfo.ProductDownloadOptions.Count -gt 0) {
-    $downloadUri = $downloadInfo.ProductDownloadOptions[0].Uri
-    $productName = $downloadInfo.ProductDownloadOptions[0].ProductDisplayName
-    $language = $downloadInfo.ProductDownloadOptions[0].Language
+    # Function to determine architecture from URI using proper regex
+    function Get-ArchitectureFromUri {
+        param([string]$Uri)
+        
+        # Extract filename from URI
+        if ($Uri -match '/([^/]+\.iso)(\?|$)') {
+            $filename = $matches[1]
+            
+            # Check for x64 pattern
+            if ($filename -match '[\-_]x64[v\.]|x64v\d') { return "x64" }
+            # Check for x32 pattern 
+            elseif ($filename -match '[\-_]x32[v\.]|x32v\d') { return "x32" }
+            # Check for arm64 pattern (future-proofing)
+            elseif ($filename -match '[\-_]arm64[v\.]|arm64v\d') { return "arm64" }
+        }
+        return "Unknown"
+    }
+    
+    # Filter for x64 version
+    $x64Option = $null
+    
+    foreach ($option in $downloadInfo.ProductDownloadOptions) {
+        $arch = Get-ArchitectureFromUri -Uri $option.Uri
+        
+        # Prefer x64 architecture
+        if ($arch -eq "x64" -and -not $x64Option) {
+            $x64Option = $option
+            Write-Host "[INFO] Found x64 version"
+        }
+    }
+    
+    # Select the best option (prefer x64, fallback to first available)
+    $selectedOption = if ($x64Option) { $x64Option } else { $downloadInfo.ProductDownloadOptions[0] }
+    
+    $downloadUri = $selectedOption.Uri
+    $productName = $selectedOption.ProductDisplayName
+    $language = $selectedOption.Language
+    $architecture = Get-ArchitectureFromUri -Uri $downloadUri
     
     # If ReturnOnly is specified, just return the URL
     if ($ReturnOnly) {
         return $downloadUri
     }
     
-    Write-Host "WINDOWS ISO DOWNLOAD INFORMATION"
-    Write-Host "Product    : $productName"
-    Write-Host "Language   : $language"
-    Write-Host "Download URI: $downloadUri"
-    
-    # Copy to clipboard with enhanced compatibility
-    try {
-        if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
-            $downloadUri | Set-Clipboard
-        } else {
-            # PowerShell 5.1 fallback
-            Add-Type -AssemblyName System.Windows.Forms
-            [System.Windows.Forms.Clipboard]::SetText($downloadUri)
-        }
-    }
-    catch {
-        # Silent fail for clipboard
-    }
+    Write-Host "[INFO] Product: $productName"
+    Write-Host "[INFO] Language: $language"
+    Write-Host "[INFO] Architecture: $architecture"
+    Write-Host "[INFO] Download URI: $downloadUri"
     
     # Also return the URL for variable capture
     return $downloadUri
