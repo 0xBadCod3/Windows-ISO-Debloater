@@ -20,18 +20,18 @@ on:
         description: 'Convert WIM to ESD?'
         required: false
         type: choice
-        default: 'no'
+        default: 'No'
         options:
-          - yes
-          - no
+          - 'Yes'
+          - 'No'
       useOscdimg:
         description: 'Use Oscdimg to create ISO?'
         required: false
         type: choice
-        default: 'no'
+        default: 'No'
         options:
-          - yes
-          - no
+          - 'Yes'
+          - 'No'
 
 jobs:
   debloat:
