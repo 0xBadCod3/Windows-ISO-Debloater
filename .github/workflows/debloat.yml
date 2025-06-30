@@ -1,0 +1,84 @@
+name: Windows ISO Debloater
+on:
+  workflow_dispatch:
+    inputs:
+      winEdition:
+        description: 'Select Windows Edition'
+        required: true
+        type: choice
+        default: 'Windows 11 Pro'
+        options:
+          - Windows 11 Home
+          - Windows 11 Pro
+          - Windows 10 Home
+          - Windows 10 Pro
+      outputISO:
+        description: 'Output ISO filename'
+        required: true
+        default: 'WinDebloated.iso'
+      esdConvert:
+        description: 'Convert WIM to ESD?'
+        required: false
+        type: choice
+        default: 'no'
+        options:
+          - yes
+          - no
+      useOscdimg:
+        description: 'Use Oscdimg to create ISO?'
+        required: false
+        type: choice
+        default: 'no'
+        options:
+          - yes
+          - no
+
+jobs:
+  debloat:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+         
+      - name: Create working directory
+        shell: pwsh
+        run: mkdir work
+        
+      - name: Download scripts
+        shell: pwsh
+        run: |
+          curl -sL https://raw.githubusercontent.com/0xBadCod3/Windows-ISO-Debloater/main/isoDebloaterScript.ps1 -o isoDebloaterScript.ps1
+          curl -sL https://raw.githubusercontent.com/0xBadCod3/Windows-ISO-Debloater/main/.github/workflows/helper.ps1 -o helper.ps1
+          curl -sL https://raw.githubusercontent.com/0xBadCod3/Windows-ISO-Debloater/main/.github/workflows/GetWindowsISO.ps1 -o GetWindowsISO.ps1
+          
+      - name: Run helper script
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          ./helper.ps1 `
+            -winEdition "${{ github.event.inputs.winEdition }}" `
+            -outputISO "${{ github.event.inputs.outputISO }}" `
+            -esdConvert "${{ github.event.inputs.esdConvert }}" `
+            -useOscdimg "${{ github.event.inputs.useOscdimg }}"
+            
+      - name: Generate SHA256 hash
+        shell: pwsh
+        run: |
+          Get-FileHash -Path "${{ github.event.inputs.outputISO }}" -Algorithm SHA256 `
+            | Select-Object -ExpandProperty Hash `
+            | Out-File "${{ github.event.inputs.outputISO }}.sha256" -Encoding ascii
+            
+      - name: Upload ISO file
+        uses: actions/upload-artifact@v4
+        with:
+          name: debloated-iso
+          path: ${{ github.event.inputs.outputISO }}
+          
+      - name: Upload SHA256 hash
+        uses: actions/upload-artifact@v4
+        with:
+          name: debloated-iso-sha256
+          path: ${{ github.event.inputs.outputISO }}.sha256

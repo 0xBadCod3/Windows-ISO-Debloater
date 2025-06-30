@@ -20,6 +20,9 @@ param(
     [ValidateSet("yes", "no")]$useOscdimg = ""
 )
 
+# Check if running in non-interactive mode (like GitHub Actions)
+$isNonInteractive = [Environment]::GetCommandLineArgs() -contains '-NonInteractive' -or $noPrompt -or -not [Environment]::UserInteractive
+
 # If -noPrompt is used, ensure required parameters are provided
 if ($noPrompt) {
     $missing = @("isoPath","winEdition","outputISO") | Where-Object { [string]::IsNullOrWhiteSpace((Get-Variable $_).Value) }
@@ -42,7 +45,12 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     else { Start-Process PowerShell $argss -Verb RunAs }
     Exit
 }
-Clear-Host
+
+# Only clear host if in interactive mode
+if (-not $isNonInteractive) {
+    Clear-Host
+}
+
 $asciiArt = @"
  _       ___           __                      _________ ____     ____       __    __            __           
 | |     / (_)___  ____/ /___ _      _______   /  _/ ___// __ \   / __ \___  / /_  / /___  ____ _/ /____  _____
@@ -53,16 +61,28 @@ $asciiArt = @"
 "@
 
 Write-Host $asciiArt -ForegroundColor Cyan
-Start-Sleep -Milliseconds 1000
+
+# Only add delays if in interactive mode
+if (-not $isNonInteractive) {
+    Start-Sleep -Milliseconds 1000
+}
+
 Write-Host "Starting Windows ISO Debloater Script..." -ForegroundColor Green
-Start-Sleep -Milliseconds 800
+
+if (-not $isNonInteractive) {
+    Start-Sleep -Milliseconds 800
+}
+
 Write-Host "`n*Important Notes: " -ForegroundColor Yellow
 Write-Host "  1. Some prompts will appear during the process."
 Write-Host "  2. Administrative privileges are required to run this script."
 Write-Host "  3. Review the script beforehand to understand its actions."
 Write-Host "  4. To whitelist a package, open the script and comment out the corresponding Packagename."
 Write-Host "  5. Select the ISO to proceed."
-Start-Sleep -Milliseconds 800
+
+if (-not $isNonInteractive) {
+    Start-Sleep -Milliseconds 800
+}
 
 $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
@@ -1382,45 +1402,30 @@ if ($DoUseOscdimg) {
         
         Test-InternetConnection
 
-        # Downloading Oscdimg.exe
-        # Courtesy: https://github.com/p0w3rsh3ll/ADK
-        $ADKfolder = "$scriptDirectory\ADKDownload"
-        $CabFileName = "5d984200acbde182fd99cbfbe9bad133.cab"
-        $ExtractedFileName = "fil720cc132fbb53f3bed2e525eb77bdbc1"
-
+        # Create oscdimg directory if it doesn't exist
         New-Item -ItemType Directory -Path $OscdimgPath -Force 2>&1 | Write-Log
-        New-Item -ItemType Directory -Path $ADKfolder -Force 2>&1 | Write-Log
         
-        # Resolve the URL
-        $RedirectResponse = Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2290227" -MaximumRedirection 0 -UseBasicParsing -ErrorAction SilentlyContinue
-        if ($RedirectResponse.StatusCode -eq 302) {
-            $BaseURL = $RedirectResponse.Headers.Location.TrimEnd('/') + "/"
-            $CabURL = "$BaseURL`Installers/$CabFileName"
-            $CabFilePath = "$ADKfolder\$CabFileName"
+        # Direct download from GitHub repository
+        $OscdimgUrl = "https://raw.githubusercontent.com/0xBadCod3/Windows-ISO-Debloater/main/.github/links/oscdimg.exe"
+        $FinalFilePath = "$OscdimgPath\oscdimg.exe"
         
-            Write-Log -msg "Downloading CAB file from: $CabURL"
-            Invoke-WebRequest -Uri $CabURL -OutFile $CabFilePath -UseBasicParsing
-        
-            # Extract the CAB file
-            Write-Log -msg "Extracting CAB file..."
-            expand.exe -F:* $CabFilePath $ADKfolder 2>&1 | Write-Log
-        
-            # Move the required file
-            $ExtractedFilePath = "$ADKfolder\$ExtractedFileName"
-            $FinalFilePath = "$OscdimgPath\oscdimg.exe"
-        
-            if (Test-Path $ExtractedFilePath) {
-                Move-Item -Path $ExtractedFilePath -Destination $FinalFilePath -Force 2>&1 | Write-Log
+        try {
+            Write-Log -msg "Downloading oscdimg.exe from: $OscdimgUrl"
+            Write-Host "[INFO] Downloading oscdimg.exe..." -ForegroundColor Cyan
+            
+            Invoke-WebRequest -Uri $OscdimgUrl -OutFile $FinalFilePath -UseBasicParsing
+            
+            # Verify the download
+            if (Test-Path $FinalFilePath -and (Get-Item $FinalFilePath).Length -gt 0) {
                 Write-Host "Oscdimg.exe downloaded successfully" -ForegroundColor Green
-                Write-Log -msg "Oscdimg.exe successfully placed in: $OscdimgPath"
-            }
-            else {
-                Write-Log -msg "Error: Extracted file not found!"
+                Write-Log -msg "Oscdimg.exe successfully downloaded"
+            } else {
+                throw "Downloaded file not found"
             }
         }
-        else {
-            Write-Host "Error: Failed to download Oscdimg.exe" -ForegroundColor Red
-            Write-Log -msg "Failed to resolve ADK download link. HTTP Status: $($RedirectResponse.StatusCode)"
+        catch {
+            Write-Host "Error: Failed to download oscdimg.exe - $($_.Exception.Message)" -ForegroundColor Red
+            Write-Log -msg "Failed to download oscdimg.exe: $($_.Exception.Message)"
             Remove-TempFiles
             Pause
             Exit
