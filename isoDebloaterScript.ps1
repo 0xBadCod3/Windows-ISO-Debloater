@@ -1416,7 +1416,7 @@ if ($DoUseOscdimg) {
             Invoke-WebRequest -Uri $OscdimgUrl -OutFile $FinalFilePath -UseBasicParsing
             
             # Verify the download
-            if (Test-Path $FinalFilePath -and (Get-Item $FinalFilePath).Length -gt 0) {
+            if ((Test-Path $FinalFilePath) -and ((Get-Item $FinalFilePath).Length -gt 0)) {
                 Write-Host "Oscdimg.exe downloaded successfully" -ForegroundColor Green
                 Write-Log -msg "Oscdimg.exe successfully downloaded"
             } else {
