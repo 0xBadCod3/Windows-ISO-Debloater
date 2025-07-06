@@ -8,6 +8,7 @@ param(
     [string]$isoPath = "",
     [string]$winEdition = "",
     [string]$outputISO = "",
+    [ValidateSet("yes", "no")]$useDISM = "",
     [ValidateSet("yes", "no")]$AppxRemove = "",
     [ValidateSet("yes", "no")]$CapabilitiesRemove = "",
     [ValidateSet("yes", "no")]$OnedriveRemove = "",
@@ -85,32 +86,59 @@ if (-not $isNonInteractive) {
 $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 $scriptDirectory = "$PSScriptRoot"
-$logFilePath = Join-Path -Path $scriptDirectory -ChildPath 'script_log.txt'
+$logFilePath = Join-Path -Path $scriptDirectory -ChildPath 'script_log.txt'         # Log File Path
+$transcript = "$env:TEMP\transcript_$(Get-Random).txt"                              # Start Transcript
+Start-Transcript $transcript -Append -ErrorAction SilentlyContinue 2>&1 | Out-Null
+
+# Get system information
+$osInfo = Get-WmiObject -Class Win32_OperatingSystem
+$logEntry = @"
+$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Script started
+- Launched As: $((Get-CimInstance Win32_Process -Filter "ProcessId = $PID").CommandLine)
+- Windows Version: $($osInfo.Caption) $($osInfo.Version) (Build $($osInfo.BuildNumber))
+- System Architecture: $($osInfo.OSArchitecture)
+- Install Date: $($osInfo.ConvertToDateTime($osInfo.InstallDate).ToString('yyyy-MM-dd HH:mm:ss'))
+- System Language: $((Get-Culture).DisplayName)
+- Default Language: $((Get-UICulture).DisplayName)
+- Windows Directory: $($env:windir)`n
+"@
 
 # Initialize log file
-"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Script started" | Out-File -FilePath $logFilePath
+$logEntry | Out-File -FilePath $logFilePath -Append
 
-# Log File
+# Function to write logs
 function Write-Log {
     [CmdletBinding()]
     param ([Parameter(ValueFromPipeline=$true)][object]$InputObj, [string]$msg, [switch]$Raw, [string]$Sep = " || ")
     process {
         $content = if ($msg) { $msg } elseif ($null -ne $InputObj) { if ($InputObj -is [string]) { $InputObj } else { $InputObj | Out-String } } else { return }
-        if (-not $Raw -and $content.Trim()) {
+        if (-not $Raw -and ($content = $content.Trim())) {
             $lines = @($content -split '\n' | Where-Object { $_.Trim() })
+            $cut = $lines | Where-Object { $_ -match '^\s*\+\s*(CategoryInfo|FullyQualifiedErrorId)\s*:' } | Select-Object -First 1
+            if ($cut) { $lines = $lines[0..($lines.IndexOf($cut) - 1)] }
             if ($lines.Count -gt 1) {
-                $processedLines = @()
-                foreach ($line in $lines) {
+                $processedLines = foreach ($line in $lines) {
                     $trimmed = $line.Trim()
-                    if ($trimmed -match '^At\s+(.+)') { $processedLines += "At $($matches[1])" }
-                    elseif ($trimmed -match '^\s*\+\s*(.+)') { $processedLines += ("+ " + ($matches[1] -replace '\s{2,}', ' ')) }
-                    elseif ($trimmed -match '^\s*\+?\s*(\w+\w+)\s*:\s*(.+)') { $processedLines += "$($matches[1]): $($matches[2])" }
-                    elseif ($trimmed -notmatch '^-{4,}' -and $trimmed) { $processedLines += ($trimmed -replace '\s{2,}', ' ') }
+                    if ($trimmed -match '^At\s+(.+)') { "At $($matches[1])" }
+                    elseif ($trimmed -match '^\s*\+\s*~+') { continue }  # Skip underline line
+                    elseif ($trimmed -match '^\s*\+\s*(.+)') { "+ " + ($matches[1] -replace '\s{2,}', ' ') }
+                    elseif ($trimmed -match '^\s*\+?\s*(\w+\w+)\s*:\s*(.+)') { "$($matches[1]): $($matches[2])" }
+                    elseif ($trimmed -notmatch '^-{4,}' -and $trimmed) { $trimmed -replace '\s{2,}', ' ' }
                 }
                 $content = $processedLines -join $Sep
-            } else { $content = ($content.Trim() -replace '\s{2,}', ' ') }
+            } else { $content = $content -replace '\s{2,}', ' ' }
         }
-        if ($content -and $content.Trim()) { Add-Content -Path "$logFilePath" -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $($content.Trim())" }
+        if ($content) { Add-Content -Path "$logFilePath" -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $content" }
+    }
+}
+
+# Function to invoke DISM commands if powershell fails
+function Invoke-DismFailsafe {
+    param([scriptblock]$PS, [scriptblock]$Dism)
+    if ($useDISM -ieq "yes") {
+        & $Dism 2>&1 | Write-Log
+    } else {
+        try { & $PS 2>&1 | Write-Log } catch { & $Dism 2>&1 | Write-Log }
     }
 }
 
@@ -131,7 +159,7 @@ function Get-Confirmation {
         $answer = $answer.ToUpper()
         if ($answer -eq 'Y') { return $true }
         if ($answer -eq 'N') { return $false }
-        Write-Host "Invalid input. Enter 'Y' for Yes, 'N' for No, or Enter for default ($defaultText)." -ForegroundColor Yellow 
+        Write-Warning "Invalid input. Enter 'Y' for Yes, 'N' for No, or Enter for default ($defaultText)."
     } while ($true) 
 }
 
@@ -154,67 +182,96 @@ function Remove-TempFiles {
     Remove-Item -Path $destinationPath -Recurse -Force 2>&1 | Write-Log
     Remove-Item -Path $installMountDir -Recurse -Force 2>&1 | Write-Log
     Remove-Item -Path "$env:SystemDrive\WIDTemp" -Recurse -Force 2>&1 | Write-Log
+    Stop-Transcript 2>&1 | Write-Log
+    $content = Get-Content $transcript | Where-Object { $_ -notmatch "^(Windows PowerShell transcript|Start time:|Username:|RunAs User:|Configuration|Host Application:|Process ID:|PS[A-Z]|BuildVersion:|CLRVersion:|WSManStackVersion:|SerializationVersion:|Transcript started|PS C:\\|^\*{10,}|End time:)" -and $_.Trim() }
+    Add-Content $logFilePath -Value ("`n" + "="*50 + "`nTerminal Snapshot - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" + "`n" + "="*50 + "`n" + ($content -join "`n"))
+    Remove-Item $transcript  -Force 2>&1 | Write-Log
 }
 
-# Force Remove Function
-function Set-OwnAndRemove {
-    param([Parameter(Mandatory)][string]$Path)
-    
-    try {
-        $FullPath = Resolve-Path -Path $Path -ErrorAction Stop
-        if (-not (Test-Path -Path $FullPath)) { return $true }
-
-        # ACL method
+# Set Ownership Permissions
+function Set-Ownership {
+    param([string]$Path, [string[]]$Registry) 
+    if ($Path) {
         try {
+            $FullPath = [System.IO.Path]::GetFullPath($Path)
+            if (-not (Test-Path -Path $FullPath)) { return $true }
             $IsFolder = (Get-Item $FullPath).PSIsContainer
             $Acl = Get-Acl $FullPath
             $Acl.SetOwner([System.Security.Principal.NTAccount]"Administrators")
             $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-            
-            if ($IsFolder) { $AccessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow") }
-            else { $AccessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", "Allow") }
-            
+            $AccessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", $(if ($IsFolder) {"ContainerInherit,ObjectInherit"} else {"None"}), "None", "Allow")
             $Acl.SetAccessRule($AccessRule)
             Set-Acl -Path $FullPath -AclObject $Acl
-            
-            # Apply to child items if folder
-            if ($IsFolder) {
-                Get-ChildItem -Path $FullPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    try {
-                        $ChildAcl = Get-Acl $_.FullName
-                        $ChildAcl.SetOwner([System.Security.Principal.NTAccount]"Administrators")
-                        $ChildAcl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", "Allow")))
-                        Set-Acl -Path $_.FullName -AclObject $ChildAcl
-                    } catch {}
-                }
-            }
-            
-            Remove-Item -Path $FullPath -Force -Recurse -ErrorAction Stop
-            "Removed with ACL: $FullPath" | Write-Log
+            if ($IsFolder) { Get-ChildItem -Path $FullPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { 
+                try { $ChildAcl = Get-Acl $_.FullName
+                    $ChildAcl.SetOwner([System.Security.Principal.NTAccount]"Administrators")
+                    $ChildAcl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, "FullControl", "Allow")))
+                    Set-Acl -Path $_.FullName -AclObject $ChildAcl }
+                catch {}
+            }}
+            Write-Log -msg "Set ownership for: $FullPath"
             return $true
-        } catch {}
-        
-        # icacls fallback
+        } catch { Write-Log -msg "Failed to own path: $Path - $($_.Exception.Message)"; return $false }
+    }
+    if ($Registry) {
         try {
-            if($IsFolder) { takeown /F "$FullPath" /R /D Y 2>&1 | Write-Log } else { takeown /F "$FullPath" /A 2>&1 | Write-Log }
-            
-            foreach ($Perm in @("*S-1-5-32-544:F", "System:F", "Administrators:F", "$CurrentUser`:F")) {
-                if($IsFolder) { icacls "$FullPath" /grant:R "$Perm" /T /C 2>&1 | Write-Log } else { icacls "$FullPath" /grant:R "$Perm" 2>&1 | Write-Log }
-                if ($LASTEXITCODE -eq 0) { break }
+            $sid = (New-Object System.Security.Principal.NTAccount("BUILTIN\Administrators")).Translate([System.Security.Principal.SecurityIdentifier])
+            $rule = New-Object System.Security.AccessControl.RegistryAccessRule("Administrators", "FullControl", "ContainerInherit", "None", "Allow")
+            foreach ($keyPath in $Registry) {
+                try {
+                    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)
+                    if ($key) { $acl = $key.GetAccessControl()
+                        $acl.SetOwner($sid)
+                        $key.SetAccessControl($acl)
+                        $key.Close()
+                        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+                        if ($key) { $acl = $key.GetAccessControl()
+                            $acl.SetAccessRule($rule)
+                            $key.SetAccessControl($acl)
+                            $key.Close()
+                            Write-Log -msg "Set ownership for registry: $keyPath"
+                        }
+                    } else { Write-Log -msg "Unable to open reg-key: $keyPath" }
+                } catch {}
             }
-            
-            Remove-Item -Path $FullPath -Force -Recurse -ErrorAction Stop
-            "Removed with icacls: $FullPath" | Write-Log
             return $true
-        } catch {}
-        
-        "Failed to remove: $FullPath" | Write-Log
-        return $false
+        } catch { Write-Log -msg "Failed to own reg-key: $($_.Exception.Message)"; return $false }
     }
-    catch {
-        "Error: $Path - $($_.Exception.Message)" | Write-Log
-        return $false
-    }
+    return $false
+}
+
+# Force Remove Function
+function Set-OwnAndRemove {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    try {
+        $FullPath = [System.IO.Path]::GetFullPath($Path)
+        if (-not (Test-Path -Path $FullPath)) { return $true }
+        try {
+            $ownershipResult = Set-Ownership -Path $Path
+            if (-not $ownershipResult) { throw "ACL method failed" }
+            Remove-Item -Path $FullPath -Force -Recurse -ErrorAction Stop
+            Write-Log -msg "Removed with ACL: $FullPath"
+            return $true
+        } catch {
+            Write-Log -msg "ACL method failed for: $FullPath"
+            try {
+                $IsFolder = (Get-Item $FullPath -ErrorAction Stop).PSIsContainer
+                $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+                if($IsFolder) { takeown /F "$FullPath" /R /D Y 2>&1 | Write-Log }
+                else { takeown /F "$FullPath" /A 2>&1 | Write-Log }
+                foreach ($Perm in @("*S-1-5-32-544:F", "System:F", "Administrators:F", "$CurrentUser`:F")) {
+                    try {
+                        if($IsFolder) { icacls "$FullPath" /grant:R "$Perm" /T /C 2>&1 | Write-Log }
+                        else { icacls "$FullPath" /grant:R "$Perm" 2>&1 | Write-Log }
+                        if ($LASTEXITCODE -eq 0) { break }
+                    } catch { continue }
+                }
+                Remove-Item -Path $FullPath -Force -Recurse -ErrorAction Stop
+                Write-Log -msg "Removed with icacls: $FullPath"
+                return $true
+            } catch { Write-Log -msg "Failed to remove: $FullPath - $($_.Exception.Message)"; return $false }
+        }
+    } catch { Write-Log -msg "Error processing path: $Path - $($_.Exception.Message)"; return $false }
 }
 
 # Image Info Function
@@ -326,8 +383,8 @@ else {
     Exit
 }
 
-$sourceDrive = "${sourceDriveLetter}:\" # Source Drive of ISO
-$destinationPath = "$env:SystemDrive\WIDTemp\winlite"   # Destination Path
+$sourceDrive = "${sourceDriveLetter}:\"                             # Source Drive of ISO
+$destinationPath = "$env:SystemDrive\WIDTemp\winlite"               # Destination Path
 $installMountDir = "$env:SystemDrive\WIDTemp\mountdir\installWIM"   # Mount Directory
 
 # Copy Files
@@ -392,11 +449,11 @@ if (-not (Test-Path $installWimPath)) {
             }
 
             # Convert ESD to WIM
-            Export-WindowsImage -SourceImagePath $installEsdPath -SourceIndex $sourceIndex -DestinationImagePath $installWimPath -CompressionType Maximum -CheckIntegrity 2>&1 | Write-Log
+            Invoke-DismFailsafe {Export-WindowsImage -SourceImagePath $installEsdPath -SourceIndex $sourceIndex -DestinationImagePath $installWimPath -CompressionType Maximum -CheckIntegrity} {dism /Export-Image /SourceImageFile:$installEsdPath /SourceIndex:$sourceIndex /DestinationImageFile:$installWimPath /Compress:max /CheckIntegrity}
             # Remove the ESD file after conversion
             Remove-Item $installEsdPath -Force
             # Mount the converted WIM with SourceIndex 1
-            Mount-WindowsImage -ImagePath $installWimPath -Index 1 -Path $installMountDir 2>&1 | Write-Log
+            Invoke-DismFailsafe {Mount-WindowsImage -ImagePath $installWimPath -Index 1 -Path $installMountDir} {dism /mount-image /imagefile:$installWimPath /index:1 /mountdir:$installMountDir}
             $sourceIndex = 1  # After conversion, the new WIM will have only one image
         }
         catch {
@@ -443,7 +500,7 @@ else {
             Write-Log -msg "Mounting image: $sourceIndex. $($selectedImage.ImageName)"
         }
 
-        Mount-WindowsImage -ImagePath $installWimPath -Index $sourceIndex -Path $installMountDir 2>&1 | Write-Log
+        Invoke-DismFailsafe {Mount-WindowsImage -ImagePath $installWimPath -Index $sourceIndex -Path $installMountDir} {dism /mount-image /imagefile:$installWimPath /index:$sourceIndex /mountdir:$installMountDir}
     }
     catch {
         Write-Host "Failed to mount the image: $_" -ForegroundColor Red
@@ -704,7 +761,7 @@ if ($DoEDGERemove) {
         $matchedPackages = Get-ProvisionedAppxPackage -Path $installMountDir | 
         Where-Object { $_.PackageName -like $pattern }
         foreach ($package in $matchedPackages) {
-            Remove-ProvisionedAppxPackage -Path $installMountDir -PackageName $package.PackageName 2>&1 | Write-Log
+            Invoke-DismFailsafe {Remove-ProvisionedAppxPackage -Path $installMountDir -PackageName $package.PackageName} {dism /image:$installMountDir /Remove-ProvisionedAppxPackage /PackageName:$($package.PackageName)}
         }
     }
 
@@ -804,30 +861,8 @@ reg load HKLM\zSOFTWARE "$installMountDir\Windows\System32\config\SOFTWARE" 2>&1
 reg load HKLM\zSYSTEM "$installMountDir\Windows\System32\config\SYSTEM" 2>&1 | Write-Log
 
 # Setting Permissions
-try {
-    $sid = (New-Object System.Security.Principal.NTAccount("BUILTIN\Administrators")).Translate([System.Security.Principal.SecurityIdentifier])
-    $rule = New-Object System.Security.AccessControl.RegistryAccessRule("Administrators", "FullControl", "ContainerInherit", "None", "Allow")
+Set-Ownership -Registry @("zSOFTWARE\Microsoft\Windows\CurrentVersion\Communications", "zSOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tasks", "zSOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows", "zSOFTWARE\Microsoft\WindowsRuntime\Server\Windows.Gaming.GameBar.Internal.PresenceWriterServer")
 
-    foreach ($keyPath in @("zSOFTWARE\Microsoft\Windows\CurrentVersion\Communications", "zSOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tasks", "zSOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows", "zSOFTWARE\Microsoft\WindowsRuntime\Server\Windows.Gaming.GameBar.Internal.PresenceWriterServer")) {
-        try {
-            $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)
-            if ($key) {
-                $acl = $key.GetAccessControl()
-                $acl.SetOwner($sid)
-                $key.SetAccessControl($acl)
-                $key.Close()
-
-                $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($keyPath, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)
-                $acl = $key.GetAccessControl()
-                $acl.SetAccessRule($rule)
-                $key.SetAccessControl($acl)
-                $key.Close()
-            }
-        }
-        catch {}
-    }
-}
-catch {}
 Write-Host ("[OK] Registry loaded") -ForegroundColor Green
 
 # Modify registry settings
@@ -957,7 +992,7 @@ if (Test-Path -Path $autounattendXmlPath) {
     Write-Log -msg "Copying Autounattend.xml"
     Copy-Item -Path $autounattendXmlPath -Destination $destinationPath -Force
 } else {
-    Write-Host "Warning: Autounattend.xml not found at $autounattendXmlPath" -ForegroundColor Yellow
+    Write-Warning "Autounattend.xml not found at $autounattendXmlPath"
     Write-Log -msg "Warning: Autounattend.xml not found at $autounattendXmlPath"
 }
 Write-Host "[DONE]" -ForegroundColor Green
@@ -1032,7 +1067,7 @@ if ($DoTPMBypass) {
         $bootWimPath = Join-Path $destinationPath "sources\boot.wim"
         $bootMountDir = "$env:SystemDrive\WIDTemp\mountdir\bootWIM"
         New-Item -ItemType Directory -Path $bootMountDir 2>&1 | Write-Log
-        Mount-WindowsImage -ImagePath $bootWimPath -Index 2 -Path $bootMountDir 2>&1 | Write-Log
+        Invoke-DismFailsafe {Mount-WindowsImage -ImagePath $bootWimPath -Index 2 -Path $bootMountDir}{ {dism /mount-image /imagefile:$bootWimPath /index:2 /mountdir:$bootMountDir}}
 
         reg load HKLM\xDEFAULT "$bootMountDir\Windows\System32\config\default" 2>&1 | Write-Log
         reg load HKLM\xNTUSER "$bootMountDir\Users\Default\ntuser.dat" 2>&1 | Write-Log
@@ -1052,7 +1087,7 @@ if ($DoTPMBypass) {
         reg unload HKLM\xNTUSER 2>&1 | Write-Log
         reg unload HKLM\xSYSTEM 2>&1 | Write-Log
 
-        Dismount-WindowsImage -Path $bootMountDir -Save 2>&1 | Write-Log
+        Invoke-DismFailsafe {Dismount-WindowsImage -Path $bootMountDir -Save} {dism /unmount-image /mountdir:$bootMountDir /commit}
         Write-Host ("[OK] TPM Bypass Successful") -ForegroundColor Green
         Write-Log -msg "Successfully modified boot.wim for TPM Bypass"
     }
@@ -1112,12 +1147,12 @@ Write-Host ("[OK] Success") -ForegroundColor Green
 # Unmounting and cleaning up the image
 Write-Host ("`n[INFO] Cleaning up image...") -ForegroundColor Cyan
 Write-Log -msg "Cleaning up image"
-Repair-WindowsImage -Path $installMountDir -StartComponentCleanup -ResetBase 2>&1 | Write-Log
+Invoke-DismFailsafe {Repair-WindowsImage -Path $installMountDir -StartComponentCleanup -ResetBase} {dism /image:$installMountDir /Cleanup-Image /StartComponentCleanup /ResetBase}
 
 Write-Host ("`n[INFO] Unmounting and Exporting image...") -ForegroundColor Cyan
 Write-Log -msg "Unmounting image"
 try {
-    Dismount-WindowsImage -Path $installMountDir -Save 2>&1 | Write-Log
+    Invoke-DismFailsafe {Dismount-WindowsImage -Path $installMountDir -Save} {dism /unmount-image /mountdir:$installMountDir /commit}
     Write-Log -msg "Image unmounted successfully"
 }
 catch {
@@ -1136,6 +1171,7 @@ $exportSuccess = $false
 
 if ($DoESDConvert) {
     Write-Host ("`n[INFO] Compressing image to esd...") -ForegroundColor Cyan
+    Write-Log -msg "Compressing image to esd"
     try {        
         $process = Start-Process -FilePath "dism.exe" -ArgumentList "/Export-Image /SourceImageFile:`"$destinationPath\sources\install.wim`" /SourceIndex:$sourceIndex /DestinationImageFile:`"$tempWimPath`" /Compress:Recovery /CheckIntegrity" -Wait -NoNewWindow -PassThru
         if ($process.ExitCode -eq 0 -and (Test-Path $tempWimPath)) {
@@ -1153,8 +1189,9 @@ if ($DoESDConvert) {
 }
 else {
     Write-Host ("`n[INFO] Exporting image to wim...") -ForegroundColor Cyan
+    Write-Log -msg "Exporting image to wim"
     try {
-        Export-WindowsImage -SourceImagePath "$destinationPath\sources\install.wim" -SourceIndex $sourceIndex -DestinationImagePath $tempWimPath -CompressionType Maximum -CheckIntegrity 2>&1 | Write-Log
+        Invoke-DismFailsafe {Export-WindowsImage -SourceImagePath "$destinationPath\sources\install.wim" -SourceIndex $sourceIndex -DestinationImagePath $tempWimPath -CompressionType Maximum -CheckIntegrity} {dism /Export-Image /SourceImageFile:$destinationPath\sources\install.wim /SourceIndex:$sourceIndex /DestinationImageFile:$tempWimPath /compress:max}
         if (Test-Path $tempWimPath) {
             $exportSuccess = $true
             Write-Host ("[OK] Export completed successfully") -ForegroundColor Green
@@ -1182,7 +1219,7 @@ if ($exportSuccess) {
         Write-Log -msg "WIM file successfully replaced"
     }
 } else {
-    Write-Host "Error: Unable to export modified WIM file. Check logs for details." -ForegroundColor Yellow
+    Write-Host "Error: Unable to export modified WIM file. Check logs for details." -ForegroundColor Red
     Write-Log -msg "WIM export failed, original WIM file preserved"
     Pause
     Exit
@@ -1200,7 +1237,7 @@ try {
         # Add a small delay to ensure file operations are complete
         Start-Sleep -Seconds 3
     } else {
-        Write-Host "Warning: WIM file validation returned no images" -ForegroundColor Yellow
+        Write-Warning "WIM file validation returned no images"
         Write-Log -msg "WIM validation warning: No images returned"
     }
 } catch {
@@ -1209,23 +1246,22 @@ try {
 }
 
 Write-Log -msg "Checking required files"
-if ($outputISO) { 
-    $ISOFileName = [System.IO.Path]::GetFileNameWithoutExtension($outputISO) 
-    $ISOFileName = $ISOFileName -replace '[<>:"/\\|?*\x00-\x1F]', ''
-    $ISOFileName = $ISOFileName.Trim()
-} else { 
+if ($outputISO) {
+    $ISOFileName = ($ISOFileName -replace '[<>:"/\\|?*\x00-\x1F\s]', '').Trim()
+    $ISOFileName = [System.IO.Path]::GetFileNameWithoutExtension($outputISO)
+} else {
     do {
         $ISOFileName = Read-Host -Prompt "`nEnter the name for the ISO file (without extension)"
-        
-        # Check if the filename is valid
-        $isValid = $ISOFileName -match '^[^<>:"/\\|?*\x00-\x1F]+$' -and $ISOFileName.Trim().Length -gt 0
-        
-        if (-not $isValid) {
-            Write-Warning "Invalid filename! The name cannot contain <>:`"/\`|?* or control characters and cannot be empty."
+
+        # Remove invalid characters
+        $ISOFileName = ($ISOFileName -replace '[<>:"/\\|?*\x00-\x1F\s]', '').Trim()
+        if ([string]::IsNullOrWhiteSpace($ISOFileName)) {
+            Write-Warning "Filename is empty or invalid. Please enter a valid name."
         }
-    } while (-not $isValid)
+    } while ([string]::IsNullOrWhiteSpace($ISOFileName))
 }
 $ISOFile = Join-Path -Path $scriptDirectory -ChildPath "$ISOFileName.iso"
+Write-Log -msg "ISO file name set to: $ISOFileName.iso"
 
 if ($DoUseOscdimg) {
     if (-not (Test-Path -Path $Oscdimg)) {
@@ -1330,7 +1366,7 @@ if ($DoUseOscdimg) {
             Write-Host ("[OK] ISO creation successful") -ForegroundColor Green
             Write-Log -msg "ISO successfully created with exit code 0"
         } else {
-            Write-Host "Warning: ISO creation finished with errors" -ForegroundColor Yellow
+            Write-Warning "ISO creation finished with errors"
             Write-Log -msg "OSCDIMG exited with code: $($oscdimgProcess.ExitCode)"
         }
     }
@@ -1439,7 +1475,7 @@ if (Test-Path -Path $ISOFile) {
         }
     }
     catch {
-        Write-Host "`nUnable to verify ISO integrity" -ForegroundColor Yellow
+        Write-Warning "`nUnable to verify ISO integrity"
         Write-Log -msg "Failed to verify ISO: $_"
     }
 } else {
