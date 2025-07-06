@@ -196,6 +196,7 @@ $monitorJob = Start-Job -ScriptBlock {
 Write-Host "[INFO] Running debloater script..."
 & pwsh -NonInteractive -NoLogo -NoProfile -ExecutionPolicy Bypass -File $debloater `
     -noPrompt `
+    -useDISM yes `
     -isoPath $isoPath `
     -winEdition $winEdition `
     -outputISO $outputISO `
